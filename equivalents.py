@@ -5,15 +5,11 @@ OECD Science, Technology and Industry Working Papers, No. 2010/02,
 OECD Publishing, Paris, https://doi.org/10.1787/5kml97dr6ptl-en.
 """
 import pandas as pd
-from joblib import Parallel, delayed
-from tqdm import tqdm
 from config import DATA_FOLDER
 
 
 # Define constants
 TLS204_PATH = DATA_FOLDER / "TLS204.feather"
-DATE_NAN = "9999-12-31"  # Placeholder for missing dates
-NCPUS = 24  # No. CPUs used for parallel processing
 
 
 def conv_list_int_string(list_int):
@@ -217,4 +213,4 @@ if __name__ == '__main__':
     # checking all groups are mutually exclusive
     assert len(get_groups_sharing_patents(equiv_list_curr)) == 0, \
         "Equivalent groups are not mutually exclusive"
-    equivalents = save_equivalents(equiv_list_curr)
+    save_equivalents(equiv_list_curr)

@@ -5,6 +5,9 @@ import pandas as pd
 from config import DATA_FOLDER
 
 
+DATE_NAN = '9999-12-31'
+
+
 def empty_to_null_string(text):
     """
     Convert empty strings to None.
@@ -38,6 +41,7 @@ def load_and_clean_person_data():
     # Merge address and country code, drop rows with both missing
     person_data = address.merge(ctry_code, on='person_id', how='outer')
     assert person_data.person_id.duplicated().sum() == 0  # Ensure no duplicate person IDs
+    # Drop rows where both address and country code are missing
     person_data.dropna(subset=['person_address', 'person_ctry_code'], how='all',
                        inplace=True)
 
@@ -86,6 +90,118 @@ def get_priority_inventor_addresses(priority_data, inventor_addresses):
     return result
 
 
+def get_appln_no_inventors(priority_filings):
+    """
+    Retrieve applications that are not associated with any inventor.
+
+    Args:
+        priority_filings (pd.DataFrame): DataFrame containing earliest priority applications 
+                                         along with the inventors' addresses.
+
+    Returns:
+        pd.DataFrame: DataFrame of applications without inventors.
+    """
+    # Retain original columns
+    cols = ['earliest_prior_appln_id', 'earliest_priority_date', 'earliest_prior_appln_auth']
+    
+    # Create a copy to avoid modifying the original DataFrame
+    priority_filings_copy = priority_filings.copy()
+
+    # Mark rows where inventor address exists
+    priority_filings_copy['address_exists'] = priority_filings_copy['person_address'].notna()
+
+    # Count how many addresses exist for each priority application
+    priority_filings_copy['address_exists_count'] = priority_filings_copy.groupby('earliest_prior_appln_id')['address_exists'].transform('sum')
+
+    # Filter applications where no inventor address exists
+    no_inventor_applns = priority_filings_copy.query("address_exists_count == 0")[cols]
+
+    return no_inventor_applns.drop_duplicates()
+
+
+def construct_equivalent_w_address(inventor_addresses, equivalents):
+    """
+    Fetch equivalents with addresses and filing date
+    Args:
+        inventor_addresses (pd.DataFrame): DataFrame containing inventor addresses.
+        equivalents (pd.DataFrame): DataFrame containing equivalents
+
+    Returns:
+        pd.DataFrame: Equivalents with inventor addresses and filing date.
+    """
+    # add filing date
+    tls201 = pd.read_feather(DATA_FOLDER / "TLS201.feather", columns=['appln_id', 'appln_filing_date'])
+    obscheck = equivalents.shape[0]
+    equivalents = equivalents.merge(tls201, on='appln_id')
+    assert equivalents.shape[0] == obscheck
+    # add inventor addresses
+    equivalents = equivalents.merge(inventor_addresses, on='appln_id', how='left')
+    # Mark rows where inventor address exists
+    equivalents['address_exists'] = equivalents['person_address'].notna()
+
+    # Count how many addresses exist for each priority application
+    equivalents['address_exists_count'] = equivalents.groupby('appln_id')['address_exists'].transform('sum')
+
+    # Filter applications where inventor address exists
+    equivalents = equivalents.query("address_exists_count > 0").copy()
+    return equivalents.drop(['address_exists', 'address_exists_count'], axis=1)
+
+
+def get_earliest_equivalent_with_address(equivalents):
+    """
+    Helper function to find the earliest equivalent application with an inventor address.
+
+    Args:
+        equivalents (pd.DataFrame): DataFrame containing equivalent patent applications.
+
+    Returns:
+        pd.DataFrame: DataFrame with the earliest equivalent inventor address.
+    """
+    equivalents.sort_values(['earliest_prior_appln_id', 'appln_filing_date', 'appln_id'], inplace=True)
+    equivalents['rank'] = equivalents.groupby('earliest_prior_appln_id').cumcount() + 1
+    return equivalents.query("rank == 1").drop(['appln_filing_date', 'rank'], axis=1).copy()
+
+
+def replenish_address(priority_no_inventor_address, inventor_addresses):
+    """
+    Replenish missing inventor addresses for priority filings from equivalent filings.
+
+    Args:
+        priority_no_inventor_address (pd.DataFrame): DataFrame containing priority applications without inventor addresses.
+        inventor_addresses (pd.DataFrame): DataFrame containing inventor addresses.
+
+    Returns:
+        pd.DataFrame: Updated DataFrame with replenished inventor addresses where possible.
+    """
+    # Load equivalent patent application data
+    equivalents = pd.read_feather(DATA_FOLDER / "patent_equivalents.feather")
+    # Add inventor address info to the equivalent applications
+    equivalents_w_address = construct_equivalent_w_address(inventor_addresses,
+                                                           equivalents)
+    # Merge priority filings (missing inventor addresses) with equivalent filings
+    priority_filing_group_no = priority_no_inventor_address.merge(equivalents,
+                                                                  left_on='earliest_prior_appln_id',
+                                                                  right_on='appln_id')
+    priority_filing_group_no.drop('appln_id', axis=1, inplace=True)
+    # Merge with equivalents that have inventor addresses
+    priority_filing_equivalents = priority_filing_group_no.merge(equivalents_w_address,
+                                                                 on='eqv_grp_num')
+    priority_filing_equivalents.drop('eqv_grp_num', axis=1, inplace=True)
+    # Exclude cases where the priority application is matched with itself
+    same_appln = priority_filing_equivalents['earliest_prior_appln_id'] == priority_filing_equivalents['appln_id']
+    priority_filing_equivalents = priority_filing_equivalents[~same_appln].copy()
+    # Fill any missing filing dates
+    priority_filing_equivalents['appln_filing_date'] = priority_filing_equivalents['appln_filing_date'].fillna(DATE_NAN)
+    
+    # Get the earliest equivalent with an inventor address for each priority application
+    earliest_equivalent_w_address = get_earliest_equivalent_with_address(priority_filing_equivalents[['earliest_prior_appln_id', 'appln_id', 'appln_filing_date']].drop_duplicates())
+    priority_filing_equivalents = priority_filing_equivalents.merge(earliest_equivalent_w_address,
+                                                                    on=['earliest_prior_appln_id', 'appln_id'])
+    priority_filing_equivalents = priority_filing_equivalents.drop('appln_filing_date', axis=1)
+    priority_filing_equivalents.rename(columns={'appln_id': 'replenished_by_appln_id'}, inplace=True)
+    return priority_filing_equivalents
+
+
 if __name__ == '__main__':
     # Load the data
     earliest_priority = pd.read_stata(DATA_FOLDER / "earliest_priority.dta")
@@ -106,9 +222,30 @@ if __name__ == '__main__':
         earliest_priority, inventor_addresses)
     priority_inventor_address.to_feather(
         DATA_FOLDER / "priority_inventors_addresses.feather")
-    
+
     assert priority_inventor_address['earliest_prior_appln_id'].nunique() == \
         earliest_priority['earliest_prior_appln_id'].nunique(), "Mismatch in count of priority filing after merge!"
-    
-    address_missing = priority_inventor_address['person_address'].isna()
 
+    # Identify priority filings that do not have any inventor addresses
+    priority_no_inventor_address = get_appln_no_inventors(priority_inventor_address)
+
+    # Replenish inventor addresses from euivalents
+    priority_w_address_replenished = replenish_address(priority_no_inventor_address,
+                                                       inventor_addresses)
+    
+    # Remove priority filings that have been replenished
+    deleted = priority_inventor_address['earliest_prior_appln_id'].isin(
+        priority_w_address_replenished['earliest_prior_appln_id']
+    )
+    priority_inventor_address = priority_inventor_address[~deleted]
+
+    # Combine the original and replenished inventor addresses
+    full_priority_inventor_address = pd.concat(
+        [priority_inventor_address, priority_w_address_replenished],
+        ignore_index=True
+    )
+
+    # Save the final result with replenished inventor addresses
+    full_priority_inventor_address.to_feather(
+        DATA_FOLDER / "priority_inventors_addresses.feather"
+    )
