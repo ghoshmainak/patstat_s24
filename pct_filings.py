@@ -7,6 +7,7 @@ from config import DATA_FOLDER
 
 TLS201_FILE = DATA_FOLDER / "TLS201.feather"
 PRIOTITY_FILE = DATA_FOLDER / "earliest_priority.dta"
+APPLN_PCT_LINK_FILE = DATA_FOLDER / "appln_PCT_link.dta"
 
 
 tls201_df = pd.read_feather(TLS201_FILE)
@@ -79,3 +80,18 @@ varibale_label_2 = {
 PCT_2_NAT_filings.to_stata(DATA_FOLDER / "PCT_national_filings.dta",
                            write_index=False,
                            variable_labels=varibale_label_2)
+
+############### PCT families ################################################
+appln_PCT_link = pd.read_stata(APPLN_PCT_LINK_FILE)
+appln_PCT_link = appln_PCT_link.query("PCT_appln==1").copy()
+appln_PCT_link.drop('PCT_appln', axis=1, inplace=True)
+appln_PCT_link['WO_appln_id'] = appln_PCT_link['WO_appln_id'].astype(int)
+list_2_add_wo_appln = []
+for wo_apln_id in appln_PCT_link['WO_appln_id'].unique():
+    list_2_add_wo_appln.append((wo_apln_id, wo_apln_id))
+df_2_add_appln = pd.DataFrame(list_2_add_wo_appln, columns=appln_PCT_link.columns)
+appln_PCT_link = pd.concat([appln_PCT_link, df_2_add_appln], ignore_index=True)
+appln_PCT_link.sort_values('WO_appln_id', inplace=True)
+appln_PCT_link.reset_index(drop=True, inplace=True)
+appln_PCT_link.to_stata(DATA_FOLDER / "PCT_families.dta",
+                        write_index=False)
