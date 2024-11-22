@@ -1,11 +1,13 @@
 """
 Find the addresses of the inventors of a priority application.
 """
+from pathlib import Path
 import pandas as pd
 from config import DATA_FOLDER
 
 
 DATE_NAN = '9999-12-31'
+ORBIS_IP_PATSTAT_MATCH = Path(r"E:\PERSONS\Mainak Ghosh\Orbis_PATSTAT_match\Data")
 
 
 def empty_to_null_string(text):
@@ -48,6 +50,30 @@ def load_and_clean_person_data():
     return person_data
 
 
+def load_orbis_ip_pat_inventor():
+    """
+    Load and transform Orbis IP patent inventors
+    """
+    columns_needed = ['PatPublNr', 'party_address_part1', 'party_city', 'party_state', 'party_postcode', 'party_country', 'RoleNbr', 'RolePos']
+    orbisip_patinvt = pd.read_feather(ORBIS_IP_PATSTAT_MATCH / "OrbisIP_Patent_Paties.feather", columns=columns_needed)
+    orbisip_patinvt = orbisip_patinvt.query("RoleNbr=='-1'").copy()
+    orbisip_patinvt.drop('RoleNbr', axis=1, inplace=True)
+    for col in ['party_address_part1', 'party_city', 'party_state', 'party_postcode', 'party_country']:
+        orbisip_patinvt[col] = orbisip_patinvt[col].str.strip()
+    orbisip_patinvt['person_address'] = orbisip_patinvt['party_address_part1'] + ' ' + orbisip_patinvt['party_city'] + ' ' + orbisip_patinvt['party_state'] + ' ' + orbisip_patinvt['party_postcode']
+    orbisip_patinvt['person_address'] = orbisip_patinvt['person_address'].str.strip() 
+    orbisip_patinvt['person_address'] = orbisip_patinvt['person_address'].map(empty_to_null_string)
+    orbisip_patinvt['party_country'] = orbisip_patinvt['party_country'].map(empty_to_null_string)
+    orbisip_patinvt = orbisip_patinvt.dropna(subset=['person_address', 'party_country']).drop(['party_address_part1', 'party_city', 'party_state', 'party_postcode'], axis=1).copy()
+    orbisip_patinvt.rename(columns={'party_country': 'person_ctry_code', 'RolePos': 'invt_seq_nr', 'PatPublNr': 'patpublnr'}, inplace=True)
+    
+    orbis_patstat_match = pd.read_feather(ORBIS_IP_PATSTAT_MATCH / "OrbisIP_patstat_matched_0.feather",
+                                          columns=['patpublnr', 'appln_id']).dropna().drop_duplicates()
+    orbisip_patinvt = orbisip_patinvt.merge(orbis_patstat_match, on='patpublnr')
+
+    return orbisip_patinvt.drop('patpublnr', axis=1)
+
+
 def get_inventor_addresses(inventors, person_data):
     """
     Merge inventor data with person address data.
@@ -65,6 +91,32 @@ def get_inventor_addresses(inventors, person_data):
     inventor_addresses = inventors.merge(person_data, on='person_id',
                                          how='left')
     return inventor_addresses.sort_values(['appln_id', 'invt_seq_nr'])
+
+
+def merge_address_from_both_worlds(patstat_invt_addr, orbis_ip_invt_addr):
+    """
+    Merge patstat inventor address with orbis ip
+    """
+    # Create a copy to avoid modifying the original DataFrame
+    patstat_invt_addr_copy = patstat_invt_addr.copy()
+
+    # Mark rows where inventor address exists
+    patstat_invt_addr_copy['address_exists'] = patstat_invt_addr_copy['person_address'].notna()
+
+    # Count how many addresses exist for each application
+    patstat_invt_addr_copy['address_exists_count'] = patstat_invt_addr_copy.groupby('appln_id')['address_exists'].transform('sum')
+
+    need_from_orbis = patstat_invt_addr_copy[patstat_invt_addr_copy['address_exists_count'] == 0].copy()[['appln_id']]
+    need_from_orbis = need_from_orbis.merge(orbis_ip_invt_addr, on='appln_id')
+
+    deleted = patstat_invt_addr_copy.appln_id.isin(
+        need_from_orbis.appln_id
+    )
+
+    patstat_invt_addr_copy = patstat_invt_addr_copy[~deleted].copy()
+    patstat_invt_addr_copy = patstat_invt_addr_copy.drop(['address_exists', 'address_exists_count'], axis=1)
+
+    return pd.concat([patstat_invt_addr_copy, need_from_orbis], ignore_index=True)
 
 
 def get_priority_inventor_addresses(priority_data, inventor_addresses):
@@ -275,9 +327,19 @@ if __name__ == '__main__':
 
     # Retrieve inventor addresses
     inventor_addresses = get_inventor_addresses(inventors, person_data)
+    inventor_addresses['source'] = 'patstat'
+
+    # Load patent inventor address from Orbis IP
+    orbisip_pat_invt = load_orbis_ip_pat_inventor()
+    orbisip_pat_invt['source'] = 'orbis_ip'
+    orbisip_pat_invt['invt_seq_nr'] = orbisip_pat_invt['invt_seq_nr'].astype(int)
+
+    # merge patstat inventor address and Orbis IP inventor address
+    inventor_addresses = merge_address_from_both_worlds(inventor_addresses,
+                                                        orbisip_pat_invt)
 
     # Ensure shape consistency
-    assert inventors.shape[0] == inventor_addresses.shape[0], "Mismatch in inventor data after merge!"
+    #assert inventors.shape[0] == inventor_addresses.shape[0], "Mismatch in inventor data after merge!"
     inventor_addresses.to_feather(
         DATA_FOLDER / "inventors_addresses.feather")
 
@@ -285,12 +347,11 @@ if __name__ == '__main__':
     # and save to the disk
     priority_inventor_address = get_priority_inventor_addresses(
         earliest_priority, inventor_addresses)
-    priority_inventor_address.to_feather(
-        DATA_FOLDER / "priority_inventors_addresses.feather")
-
     assert priority_inventor_address['earliest_prior_appln_id'].nunique() == \
         earliest_priority['earliest_prior_appln_id'].nunique(), "Mismatch in count of priority filing after merge!"
-
+    priority_inventor_address.to_feather(
+        DATA_FOLDER / "priority_inventors_addresses.feather")
+    
     # Identify priority filings that do not have any inventor addresses
     priority_no_inventor_address = get_appln_no_inventors(priority_inventor_address)
 
