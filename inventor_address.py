@@ -66,12 +66,20 @@ def load_orbis_ip_pat_inventor():
     orbisip_patinvt['party_country'] = orbisip_patinvt['party_country'].map(empty_to_null_string)
     orbisip_patinvt = orbisip_patinvt.dropna(subset=['person_address', 'party_country']).drop(['party_address_part1', 'party_city', 'party_state', 'party_postcode'], axis=1).copy()
     orbisip_patinvt.rename(columns={'party_country': 'person_ctry_code', 'RolePos': 'invt_seq_nr', 'PatPublNr': 'patpublnr'}, inplace=True)
-    
-    orbis_patstat_match = pd.read_feather(ORBIS_IP_PATSTAT_MATCH / "OrbisIP_patstat_matched_0.feather",
-                                          columns=['patpublnr', 'appln_id']).dropna().drop_duplicates()
-    orbisip_patinvt = orbisip_patinvt.merge(orbis_patstat_match, on='patpublnr')
 
-    return orbisip_patinvt.drop('patpublnr', axis=1)
+    orbis_patstat_match = pd.read_feather(ORBIS_IP_PATSTAT_MATCH / "OrbisIP_patstat_matched_0.feather",
+                                          columns=['patpublnr', 'appln_id', 'publn_date'])
+    orbis_patstat_match = orbis_patstat_match.dropna(subset=['patpublnr', 'appln_id']).drop_duplicates()
+    orbis_patstat_match['publn_date'] = orbis_patstat_match['publn_date'].fillna(DATE_NAN)
+    orbis_patstat_match = orbis_patstat_match.sort_values(['appln_id', 'publn_date', 'patpublnr'])
+    orbis_patstat_match['priority'] = orbis_patstat_match.groupby('appln_id').cumcount() + 1
+    orbis_patstat_match.drop('publn_date', axis=1, inplace=True)
+
+    orbisip_patinvt = orbisip_patinvt.merge(orbis_patstat_match, on='patpublnr')
+    orbisip_patinvt['highest_priority'] = orbisip_patinvt.groupby('appln_id')['priority'].transform('min')
+    orbisip_patinvt = orbisip_patinvt.query("highest_priority == priority").copy()
+
+    return orbisip_patinvt.drop(['patpublnr', 'priority', 'highest_priority'], axis=1)
 
 
 def get_inventor_addresses(inventors, person_data):

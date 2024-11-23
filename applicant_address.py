@@ -1,7 +1,9 @@
+from pathlib import Path
 import pandas as pd
 from config import DATA_FOLDER
 
 
+ORBIS_IP_PATSTAT_MATCH = Path(r"E:\PERSONS\Mainak Ghosh\Orbis_PATSTAT_match\Data")
 DATE_NAN = '9999-12-31'
 
 
@@ -245,6 +247,64 @@ def get_docdb_level_applt_address(applt_addresses, tls201):
     return appln_docdb
 
 
+def load_orbis_ip_pat_applicant():
+    """
+    Load and transform Orbis IP patent applicants
+    """
+    columns_needed = ['PatPublNr', 'party_address_part1', 'party_city', 'party_state', 'party_postcode', 'party_country', 'RoleNbr', 'RolePos']
+    orbisip_patapplt = pd.read_feather(ORBIS_IP_PATSTAT_MATCH / "OrbisIP_Patent_Paties.feather", columns=columns_needed)
+    orbisip_patapplt = orbisip_patapplt.query("RoleNbr=='0'").copy()
+    orbisip_patapplt.drop('RoleNbr', axis=1, inplace=True)
+    for col in ['party_address_part1', 'party_city', 'party_state', 'party_postcode', 'party_country']:
+        orbisip_patapplt[col] = orbisip_patapplt[col].str.strip()
+    orbisip_patapplt['person_address'] = orbisip_patapplt['party_address_part1'] + ' ' + orbisip_patapplt['party_city'] + ' ' + orbisip_patapplt['party_state'] + ' ' + orbisip_patapplt['party_postcode']
+    orbisip_patapplt['person_address'] = orbisip_patapplt['person_address'].str.strip() 
+    orbisip_patapplt['person_address'] = orbisip_patapplt['person_address'].map(empty_to_null_string)
+    orbisip_patapplt['party_country'] = orbisip_patapplt['party_country'].map(empty_to_null_string)
+    orbisip_patapplt = orbisip_patapplt.dropna(subset=['person_address', 'party_country']).drop(['party_address_part1', 'party_city', 'party_state', 'party_postcode'], axis=1).copy()
+    orbisip_patapplt.rename(columns={'party_country': 'person_ctry_code', 'RolePos': 'applt_seq_nr', 'PatPublNr': 'patpublnr'}, inplace=True)
+    
+    orbis_patstat_match = pd.read_feather(ORBIS_IP_PATSTAT_MATCH / "OrbisIP_patstat_matched_0.feather",
+                                          columns=['patpublnr', 'appln_id', 'publn_date'])
+    orbis_patstat_match = orbis_patstat_match.dropna(subset=['patpublnr', 'appln_id']).drop_duplicates()
+    orbis_patstat_match['publn_date'] = orbis_patstat_match['publn_date'].fillna(DATE_NAN)
+    orbis_patstat_match = orbis_patstat_match.sort_values(['appln_id', 'publn_date', 'patpublnr'])
+    orbis_patstat_match['priority'] = orbis_patstat_match.groupby('appln_id').cumcount() + 1
+    orbis_patstat_match.drop('publn_date', axis=1, inplace=True)
+
+    orbisip_patapplt = orbisip_patapplt.merge(orbis_patstat_match, on='patpublnr')
+    orbisip_patapplt['highest_priority'] = orbisip_patapplt.groupby('appln_id')['priority'].transform('min')
+    orbisip_patapplt = orbisip_patapplt.query("highest_priority == priority").copy()
+
+    return orbisip_patapplt.drop(['patpublnr', 'priority', 'highest_priority'], axis=1)
+
+
+def merge_address_from_both_worlds(patstat_applt_addr, orbis_ip_applt_addr):
+    """
+    Merge patstat applicant address with orbis ip
+    """
+    # Create a copy to avoid modifying the original DataFrame
+    patstat_applt_addr_copy = patstat_applt_addr.copy()
+
+    # Mark rows where inventor address exists
+    patstat_applt_addr_copy['address_exists'] = patstat_applt_addr_copy['person_address'].notna()
+
+    # Count how many addresses exist for each application
+    patstat_applt_addr_copy['address_exists_count'] = patstat_applt_addr_copy.groupby('appln_id')['address_exists'].transform('sum')
+
+    need_from_orbis = patstat_applt_addr_copy[patstat_applt_addr_copy['address_exists_count'] == 0].copy()[['appln_id']]
+    need_from_orbis = need_from_orbis.merge(orbis_ip_applt_addr, on='appln_id')
+
+    deleted = patstat_applt_addr_copy.appln_id.isin(
+        need_from_orbis.appln_id
+    )
+
+    patstat_applt_addr_copy = patstat_applt_addr_copy[~deleted].copy()
+    patstat_applt_addr_copy = patstat_applt_addr_copy.drop(['address_exists', 'address_exists_count'], axis=1)
+
+    return pd.concat([patstat_applt_addr_copy, need_from_orbis], ignore_index=True)
+
+
 if __name__ == '__main__':
     # Load TLS201 (appln_id and appln_filing_date)   
     tls201 = pd.read_feather(DATA_FOLDER / "TLS201.feather", columns=['appln_id', 'appln_filing_date'])
@@ -258,9 +318,19 @@ if __name__ == '__main__':
 
     # Retrieve applicant addresses
     applicant_addresses = get_applicant_addresses(applicants, person_data)
+    applicant_addresses['source'] = 'patstat'
+
+    # Load patent applicant address from Orbis IP
+    orbisip_pat_applt = load_orbis_ip_pat_applicant()
+    orbisip_pat_applt['source'] = 'orbis_ip'
+    orbisip_pat_applt['applt_seq_nr'] = orbisip_pat_applt['applt_seq_nr'].astype(int)
+
+    # merge patstat applicant address and Orbis IP applicant address
+    applicant_addresses = merge_address_from_both_worlds(applicant_addresses,
+                                                         orbisip_pat_applt)
 
     # Ensure shape consistency
-    assert applicants.shape[0] == applicant_addresses.shape[0], "Mismatch in applicant data after merge!"
+    #assert applicants.shape[0] == applicant_addresses.shape[0], "Mismatch in applicant data after merge!"
     applicant_addresses.to_feather(
         DATA_FOLDER / "applicants_addresses.feather")
     
