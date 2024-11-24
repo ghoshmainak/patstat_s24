@@ -292,7 +292,7 @@ def merge_address_from_both_worlds(patstat_applt_addr, orbis_ip_applt_addr):
     # Count how many addresses exist for each application
     patstat_applt_addr_copy['address_exists_count'] = patstat_applt_addr_copy.groupby('appln_id')['address_exists'].transform('sum')
 
-    need_from_orbis = patstat_applt_addr_copy[patstat_applt_addr_copy['address_exists_count'] == 0].copy()[['appln_id']]
+    need_from_orbis = patstat_applt_addr_copy[patstat_applt_addr_copy['address_exists_count'] == 0].copy()[['appln_id']].drop_duplicates()
     need_from_orbis = need_from_orbis.merge(orbis_ip_applt_addr, on='appln_id')
 
     deleted = patstat_applt_addr_copy.appln_id.isin(

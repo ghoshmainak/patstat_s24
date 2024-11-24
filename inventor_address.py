@@ -114,7 +114,7 @@ def merge_address_from_both_worlds(patstat_invt_addr, orbis_ip_invt_addr):
     # Count how many addresses exist for each application
     patstat_invt_addr_copy['address_exists_count'] = patstat_invt_addr_copy.groupby('appln_id')['address_exists'].transform('sum')
 
-    need_from_orbis = patstat_invt_addr_copy[patstat_invt_addr_copy['address_exists_count'] == 0].copy()[['appln_id']]
+    need_from_orbis = patstat_invt_addr_copy[patstat_invt_addr_copy['address_exists_count'] == 0].copy()[['appln_id']].drop_duplicates()
     need_from_orbis = need_from_orbis.merge(orbis_ip_invt_addr, on='appln_id')
 
     deleted = patstat_invt_addr_copy.appln_id.isin(
@@ -346,8 +346,6 @@ if __name__ == '__main__':
     inventor_addresses = merge_address_from_both_worlds(inventor_addresses,
                                                         orbisip_pat_invt)
 
-    # Ensure shape consistency
-    #assert inventors.shape[0] == inventor_addresses.shape[0], "Mismatch in inventor data after merge!"
     inventor_addresses.to_feather(
         DATA_FOLDER / "inventors_addresses.feather")
 
