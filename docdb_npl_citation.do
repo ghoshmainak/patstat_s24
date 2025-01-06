@@ -4,7 +4,7 @@ do config.do
 
 capture log close
 set more off
-log using "$LOG/docdb_npl_citations", t replace
+log using "$LOG_DIR/docdb_npl_citations", t replace
 ******************************************************
 
 clear

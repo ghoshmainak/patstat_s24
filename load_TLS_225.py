@@ -2,7 +2,7 @@ import pandas as pd
 from config import RAW_FOLDER, DATA_FOLDER
 
 
-TABLE_NAME = "tls801"
+TABLE_NAME = "tls225"
 files_list = []
 for file in RAW_FOLDER.glob(f"{TABLE_NAME}*.csv"):
     _df = pd.read_csv(file, low_memory=False)
@@ -11,4 +11,4 @@ for file in RAW_FOLDER.glob(f"{TABLE_NAME}*.csv"):
 df = pd.concat(files_list, ignore_index=True)
 del files_list
 print(f"shape of {TABLE_NAME}={df.shape}")
-df.to_stata(DATA_FOLDER / f"{TABLE_NAME.upper()}.dta", write_index=False)
+df.to_feather(DATA_FOLDER / f"{TABLE_NAME.upper()}.feather")
